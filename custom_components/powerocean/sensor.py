@@ -241,13 +241,22 @@ class PowerOceanSensor(SensorEntity):
         # The unit of measurement for the sensor
         self._unit = endpoint.unit
 
-        # Set entity category to diagnostic for sensors with no unit
-        if ecoflow.options.get("group_sensors") and not endpoint.unit:
+        # Set entity category to diagnostic for sensors which are labeled as diagnostic
+        if ecoflow.options.get("group_sensors") and endpoint.is_diagnostic:
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         # If diagnostics entity then disable sensor by default
-        if ecoflow.options.get("disable_sensors") and not endpoint.unit:
+        if ecoflow.options.get("disable_sensors") and endpoint.unit:
             self._attr_entity_registry_enabled_default = False
+
+
+        # TODO: remove if new version above is working
+        # if ecoflow.options.get("group_sensors") and not endpoint.unit:
+        #     self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        #
+        # # If diagnostics entity then disable sensor by default
+        # if ecoflow.options.get("disable_sensors") and not endpoint.unit:
+        #     self._attr_entity_registry_enabled_default = False
 
     @property
     def should_poll(self):

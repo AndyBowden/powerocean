@@ -15,7 +15,7 @@ from .const import _LOGGER, ISSUE_URL_ERROR_MESSAGE
 # Better storage of PowerOcean endpoint
 PowerOceanEndPoint = namedtuple(
     "PowerOceanEndPoint",
-    "internal_unique_id, serial, name, friendly_name, value, unit, description, icon",
+    "internal_unique_id, serial, name, friendly_name, value, unit, description, icon, is_diagnostic",
 )
 
 
@@ -135,19 +135,20 @@ class Ecoflow:
 
     def __get_unit(self, key):
         """Function get unit from key Name."""
-        if key.endswith(("pwr", "Pwr", "Power")):
+        keylow = str(key).lower()
+        if keylow.endswith(("pwr", "pwr_total", "power")):
             unit = "W"
-        elif key.endswith(("amp", "Amp")):
+        elif keylow.endswith("amp"):
             unit = "A"
-        elif key.endswith(("soc", "Soc", "soh", "Soh")):
+        elif keylow.endswith(("soc", "soh")):
             unit = "%"
-        elif key.endswith(("vol", "Vol")):
+        elif keylow.endswith("vol"):
             unit = "V"
-        elif key.endswith(("Watth", "Energy")):
+        elif keylow.endswith("watth"):
             unit = "Wh"
-        elif "Generation" in key:
+        elif keylow.endswith(("generation","energy")):
             unit = "kWh"
-        elif key.startswith("bpTemp"):  # TODO: alternative: 'Temp' in key
+        elif keylow.startswith("temp"):
             unit = "°C"
         else:
             unit = None
@@ -186,6 +187,36 @@ class Ecoflow:
 
         return description
 
+    def __get_icon(self, key, is_solar=False):
+        """Function choose icon from key name"""
+        keylow = str(key).lower()
+        if keylow.endswith(("pwr", "pwr_total", "power")):
+            if is_solar:
+                icon = "mdi:solar-power"
+                # icon = "mdi:solar-power-variant"  # Alternative
+            else:
+                icon = "midi:flash"
+        elif keylow.endswith("amp"):
+            icon = "mdi:current-dc"
+        elif keylow.endswith(("soc", "soh")):
+            icon = "midi:battery"
+        elif keylow.endswith("vol"):
+            icon = "midi:sine-wave"
+        elif keylow.endswith("watth"):
+            icon = "midi:lightning-bolt"
+        elif keylow.endswith(("generation","energy")):
+            icon = "midi:lightning-bolt"
+        elif keylow.startswith("temp") or keylow.endswith("temp"):
+            icon = "midi:thermometer"
+        elif keylow.find("mpptpv") >= 0:
+            icon = "mdi:solar-power"
+            #icon = "mdi:solar-power-variant"  # Alternative
+        else:
+            icon = None
+
+        return icon
+
+
     def _get_sensors(self, response):
         # get sensors from response['data']
         sensors = self.__get_sensors_data(response)
@@ -212,6 +243,7 @@ class Ecoflow:
         # [ 'bpSoc', 'sysBatChgUpLimit', 'sysBatDsgDownLimit','sysGridSta', 'sysOnOffMachineStat',
         #   'location', 'timezone', 'quota']
 
+        # selction of sensors to use
         sens_select = [
             "sysLoadPwr",
             "sysGridPwr",
@@ -226,16 +258,19 @@ class Ecoflow:
             "createTime",
         ]
 
+        # definition diagnostic sensors
+        sens_diag = [
+            "online",
+            "systemName",
+            "createTime",
+        ]
+
         sensors = dict()  # start with empty dict
         for key, value in d.items():
             if key in sens_select:  # use only sensors in sens_select
                 if not isinstance(value, dict):
                     # default uid, unit and descript
                     unique_id = f"{self.sn}_{key}"
-                    special_icon = None
-                    if key == "mpptPwr":
-                        special_icon = "mdi:solar-power"
-
                     sensors[unique_id] = PowerOceanEndPoint(
                         internal_unique_id=unique_id,
                         serial=self.sn,
@@ -244,7 +279,8 @@ class Ecoflow:
                         value=value,
                         unit=self.__get_unit(key),
                         description=self.__get_description(key),
-                        icon=special_icon,
+                        icon=self.__get_icon(key),
+                        is_diagnostic = key in sens_diag
                     )
 
         return sensors
@@ -297,12 +333,19 @@ class Ecoflow:
         wfc = list(filter(r.match, keys))  # warning/fault code keys
         sens_select += wfc
 
+        # definition diagnostic sensors
+        sens_diag = [
+            "online",
+            "systemName",
+            "createTime",
+        ]
+        sens_diag += wfc
+
         data = {}
         for key, value in d.items():
             if key in sens_select:  # use only sensors in sens_select
                 # default uid, unit and descript
                 unique_id = f"{self.sn}_{report}_{key}"
-
                 data[unique_id] = PowerOceanEndPoint(
                     internal_unique_id=unique_id,
                     serial=self.sn,
@@ -311,7 +354,8 @@ class Ecoflow:
                     value=value,
                     unit=self.__get_unit(key),
                     description=self.__get_description(key),
-                    icon=None,
+                    icon=self.__get_icon(key),
+                    is_diagnostic=key in sens_diag,
                 )
         dict.update(sensors, data)
 
@@ -333,10 +377,22 @@ class Ecoflow:
             "bpCycles",
             "bpSysState",
             "bpRemainWatth",
+            "bpMinCellTemp",
+            "bpMaxCellTemp",
+        ]
+
+        sens_diag = [
+            "bpVol",
+            "bpAmp",
+            "bpSysState",
+            "bpMinCellTemp",
+            "bpMaxCellTemp",
+            "bpMeanCellTemp",
         ]
 
         data = {}
         prefix = "bpack"
+        bpPwr_sum = 0.0
         for ibat, bat in enumerate(batts):
             name = prefix + "%i_" % (ibat + 1)
             d_bat = json_loads(d[bat])
@@ -345,9 +401,8 @@ class Ecoflow:
                     # default uid, unit and descript
                     unique_id = f"{self.sn}_{report}_{bat}_{key}"
                     description_tmp = f"{name}" + self.__get_description(key)
-                    special_icon = None
-                    if key == "bpAmp":
-                        special_icon = "mdi:current-dc"
+                    if key == "bpPwr":
+                        bpPwr_sum += value
                     data[unique_id] = PowerOceanEndPoint(
                         internal_unique_id=unique_id,
                         serial=self.sn,
@@ -356,24 +411,43 @@ class Ecoflow:
                         value=value,
                         unit=self.__get_unit(key),
                         description=description_tmp,
-                        icon=special_icon,
+                        icon=self.__get_icon(key),
+                        is_diagnostic=key in sens_diag,
                     )
+
             # compute mean temperature of cells
-            key = "bpTemp"
-            temp = d_bat[key]
+            label = "bpMeanCellTemp"
+            temp = d_bat["bpTemp"]
             value = sum(temp) / len(temp)
-            unique_id = f"{self.sn}_{report}_{bat}_{key}"
-            description_tmp = f"{name}" + self.__get_description(key)
+            unique_id = f"{self.sn}_{report}_{bat}_{label}"
+            description_tmp = f"{name}" + self.__get_description(label)
             data[unique_id] = PowerOceanEndPoint(
                 internal_unique_id=unique_id,
                 serial=self.sn,
-                name=f"{self.sn}_{name + key}",
-                friendly_name=name + key,
+                name=f"{self.sn}_{name + label}",
+                friendly_name=name + label,
                 value=value,
-                unit=self.__get_unit(key),
+                unit=self.__get_unit(label),
                 description=description_tmp,
-                icon=None,
+                icon=self.__get_icon(label),
+                is_diagnostic=True,
             )
+
+        # create a total power sensor
+        key = "bpPwr_Total"
+        unique_id = f"{self.sn}_{report}_{key}"
+        description_tmp = self.__get_description(key)
+        data[unique_id] = PowerOceanEndPoint(
+            internal_unique_id=unique_id,
+            serial=self.sn,
+            name=f"{self.sn}_{key}",
+            friendly_name=f"{key}",
+            value=bpPwr_sum,
+            unit=self.__get_unit(key),
+            description=description_tmp,
+            icon=self.__get_icon(key),
+            is_diagnostic=False,
+        )
 
         dict.update(sensors, data)
 
@@ -391,6 +465,7 @@ class Ecoflow:
             "pcsMeterPower",
 
         ]
+        is_diag = ["emsBpAliveNum"]
         data = {}
         for key, value in d.items():
             if key in sens_select:
@@ -405,7 +480,8 @@ class Ecoflow:
                     value=value,
                     unit=self.__get_unit(key),
                     description=description_tmp,
-                    icon=None,
+                    icon=self.__get_icon(key),
+                    is_diagnostic=key in is_diag,
                 )
 
         # special for phases
@@ -423,7 +499,8 @@ class Ecoflow:
                     value=value,
                     unit=self.__get_unit(key),
                     description=self.__get_description(key),
-                    icon=None,
+                    icon=self.__get_icon(key),
+                    is_diagnostic=True
                 )
 
         # special for mpptPv
@@ -436,11 +513,10 @@ class Ecoflow:
             for key, value in d["mpptHeartBeat"][0]["mpptPv"][i].items():
                 unique_id = f"{self.sn}_{report}_mpptHeartBeat_{mpptpv}_{key}"
                 special_icon = None
-                if key.endswith("amp"):
-                    special_icon = "mdi:current-dc"
                 if key.endswith("pwr"):
-                    special_icon = "mdi:solar-power"
-
+                    is_solar = True
+                else:
+                    is_solar = False
                 data[unique_id] = PowerOceanEndPoint(
                     internal_unique_id=unique_id,
                     serial=self.sn,
@@ -449,7 +525,8 @@ class Ecoflow:
                     value=value,
                     unit=self.__get_unit(key),
                     description=self.__get_description(key),
-                    icon=special_icon,
+                    icon=self.__get_icon(key, is_solar=is_solar),
+                    is_diagnostic=False,
                 )
                 # sum power of all strings
                 if key == "pwr":
@@ -458,7 +535,6 @@ class Ecoflow:
         # create total power sensor of all strings
         name = "mpptPv_pwrTotal"
         unique_id = f"{self.sn}_{report}_mpptHeartBeat_{name}"
-
         data[unique_id] = PowerOceanEndPoint(
             internal_unique_id=unique_id,
             serial=self.sn,
@@ -467,7 +543,8 @@ class Ecoflow:
             value=mpptPv_sum,
             unit=self.__get_unit(key),
             description="Solarertrag aller Strings",
-            icon="mdi:solar-power",
+            icon=self.__get_icon(key, is_solar=True),
+            is_diagnostic=False,
         )
 
         dict.update(sensors, data)
