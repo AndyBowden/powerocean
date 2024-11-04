@@ -146,9 +146,9 @@ class Ecoflow:
             unit = "V"
         elif keylow.endswith("watth"):
             unit = "Wh"
-        elif keylow.endswith(("generation","energy")):
+        elif keylow.endswith(("generation", "energy")):
             unit = "kWh"
-        elif keylow.startswith("temp"):
+        elif keylow.endswith("temp"):
             unit = "°C"
         else:
             unit = None
@@ -195,27 +195,29 @@ class Ecoflow:
                 icon = "mdi:solar-power"
                 # icon = "mdi:solar-power-variant"  # Alternative
             else:
-                icon = "midi:flash"
+                icon = "mdi:flash"
+        elif keylow.endswith("phase_amp"):
+            icon = "mdi:current-ac"
         elif keylow.endswith("amp"):
             icon = "mdi:current-dc"
-        elif keylow.endswith(("soc", "soh")):
-            icon = "midi:battery"
+        # ohne icon werden Batterien auch erkannt und zeigen sogar den Status an > siehe aktuelle Version.
+        # elif keylow.endswith(("soc", "soh")):
+        #    icon = "mdi:battery"
         elif keylow.endswith("vol"):
-            icon = "midi:sine-wave"
+            icon = "mdi:sine-wave"
         elif keylow.endswith("watth"):
-            icon = "midi:lightning-bolt"
-        elif keylow.endswith(("generation","energy")):
-            icon = "midi:lightning-bolt"
-        elif keylow.startswith("temp") or keylow.endswith("temp"):
-            icon = "midi:thermometer"
+            icon = "mdi:lightning-bolt"
+        elif keylow.endswith(("generation", "energy")):
+            icon = "mdi:lightning-bolt"
+        elif keylow.endswith("temp"):
+            icon = "mdi:thermometer"
         elif keylow.find("mpptpv") >= 0:
             icon = "mdi:solar-power"
-            #icon = "mdi:solar-power-variant"  # Alternative
+            # icon = "mdi:solar-power-variant"  # Alternative
         else:
             icon = None
 
         return icon
-
 
     def _get_sensors(self, response):
         # get sensors from response['data']
@@ -280,7 +282,7 @@ class Ecoflow:
                         unit=self.__get_unit(key),
                         description=self.__get_description(key),
                         icon=self.__get_icon(key),
-                        is_diagnostic = key in sens_diag
+                        is_diagnostic=key in sens_diag,
                     )
 
         return sensors
@@ -338,6 +340,8 @@ class Ecoflow:
             "online",
             "systemName",
             "createTime",
+            "bpOnlineSum",  # number of batteries
+            "emsCtrlLedBright",
         ]
         sens_diag += wfc
 
@@ -382,8 +386,10 @@ class Ecoflow:
         ]
 
         sens_diag = [
+            "bpSoh",
             "bpVol",
             "bpAmp",
+            "bpCycles",
             "bpSysState",
             "bpMinCellTemp",
             "bpMaxCellTemp",
@@ -463,7 +469,6 @@ class Ecoflow:
             "emsBpPower",
             "pcsActPwr",
             "pcsMeterPower",
-
         ]
         is_diag = ["emsBpAliveNum"]
         data = {}
@@ -499,8 +504,9 @@ class Ecoflow:
                     value=value,
                     unit=self.__get_unit(key),
                     description=self.__get_description(key),
-                    icon=self.__get_icon(key),
-                    is_diagnostic=True
+                    # get_icon from name, Unterscheidung für current ac/dc
+                    icon=self.__get_icon(name),
+                    is_diagnostic=True,
                 )
 
         # special for mpptPv
@@ -509,25 +515,38 @@ class Ecoflow:
         for i in range(1, n_strings + 1):
             mpptpvs.append(f"mpptPv{i}")
         mpptPv_sum = 0.0
+        sens_select = [
+            "pwr",
+            "vol",
+            "amp",
+            "lightSta",
+        ]
+
+        sens_diag = [
+            "vol",
+            "amp",
+            "lightSta",
+        ]
+
         for i, mpptpv in enumerate(mpptpvs):
             for key, value in d["mpptHeartBeat"][0]["mpptPv"][i].items():
-                unique_id = f"{self.sn}_{report}_mpptHeartBeat_{mpptpv}_{key}"
-                special_icon = None
-                if key.endswith("pwr"):
-                    is_solar = True
-                else:
-                    is_solar = False
-                data[unique_id] = PowerOceanEndPoint(
-                    internal_unique_id=unique_id,
-                    serial=self.sn,
-                    name=f"{self.sn}_{mpptpv}_{key}",
-                    friendly_name=f"{mpptpv}_{key}",
-                    value=value,
-                    unit=self.__get_unit(key),
-                    description=self.__get_description(key),
-                    icon=self.__get_icon(key, is_solar=is_solar),
-                    is_diagnostic=False,
-                )
+                if key in sens_select:
+                    unique_id = f"{self.sn}_{report}_mpptHeartBeat_{mpptpv}_{key}"
+                    if key.endswith("pwr"):
+                        is_solar = True
+                    else:
+                        is_solar = False
+                    data[unique_id] = PowerOceanEndPoint(
+                        internal_unique_id=unique_id,
+                        serial=self.sn,
+                        name=f"{self.sn}_{mpptpv}_{key}",
+                        friendly_name=f"{mpptpv}_{key}",
+                        value=value,
+                        unit=self.__get_unit(key),
+                        description=self.__get_description(key),
+                        icon=self.__get_icon(key, is_solar=is_solar),
+                        is_diagnostic=key in sens_diag,
+                    )
                 # sum power of all strings
                 if key == "pwr":
                     mpptPv_sum += value
