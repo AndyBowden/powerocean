@@ -53,7 +53,8 @@ class Ecoflow:
     def authorize(self):
         """Function authorize"""
         auth_ok = False  # default
-        headers = {"lang": "en_US", "content-type": "application/json"}
+        headers = {"lang": "en_US", "content-type": "application/json",
+                  "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"}
         data = {
             "email": self.ecoflow_username,
             "password": base64.b64encode(self.ecoflow_password.encode()).decode(),
@@ -115,7 +116,8 @@ class Ecoflow:
 
         url = self.url_user_fetch
         try:
-            headers = {"authorization": f"Bearer {self.token}", "lang": "en_US", "content-type": "application/json", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"}
+            headers = {"authorization": f"Bearer {self.token}", "lang": "en_US", "content-type": "application/json", 
+                       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"}
             request = requests.get(self.url_user_fetch, headers=headers, timeout=30)
             response = self.get_json_response(request)
 
