@@ -1,21 +1,18 @@
 """ecoflow.py: API for PowerOcean integration."""
+# modification of niltrip's version to provide for Power Ocean Dual Master/Slave Inverter Installations
+# Andy Bowden Jan23 2025
 
+import requests
 import base64
 import re
 from collections import namedtuple
-from pathlib import Path
+from requests.exceptions import RequestException
 
-import requests
 from homeassistant.exceptions import IntegrationError
 from homeassistant.util.json import json_loads
-from requests.exceptions import RequestException
 
 from .const import _LOGGER, ISSUE_URL_ERROR_MESSAGE
 
-# Mock path to response.json file
-FAKEDATA = Path("documentation/response.json")
-# Dict with entity names to use
-SENSSELECT = Path("custom_components/powerocean/datapoints.json")
 
 # Better storage of PowerOcean endpoint
 PowerOceanEndPoint = namedtuple(
@@ -29,8 +26,10 @@ PowerOceanEndPoint = namedtuple(
 class Ecoflow:
     """Class representing Ecoflow"""
 
-    def __init__(self, serialnumber: str, username: str, password: str):
+    def __init__(self, serialnumber, username, password):
         self.sn = serialnumber
+        self.master_sn = serialnumber
+        self.slave_sn = None
         self.unique_id = serialnumber
         self.ecoflow_username = username
         self.ecoflow_password = password
@@ -42,7 +41,7 @@ class Ecoflow:
         # self.authorize()  # authorize user and get device details
 
     def get_device(self):
-        """Get device info."""
+        """Function get device"""
         self.device = {
             "product": "PowerOcean",
             "vendor": "Ecoflow",
@@ -58,7 +57,8 @@ class Ecoflow:
     def authorize(self):
         """Function authorize"""
         auth_ok = False  # default
-        headers = {"lang": "en_US", "content-type": "application/json"}
+        headers = {"lang": "en_US", "content-type": "application/json",
+                  "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"}
         data = {
             "email": self.ecoflow_username,
             "password": base64.b64encode(self.ecoflow_password.encode()).decode(),
@@ -69,7 +69,7 @@ class Ecoflow:
         try:
             url = self.url_iot_app
             _LOGGER.info("Login to EcoFlow API %s", {url})
-            request = requests.post(url, json=data, headers=headers, timeout=10)
+            request = requests.post(url, json=data, headers=headers)
             response = self.get_json_response(request)
 
         except ConnectionError:
@@ -79,13 +79,13 @@ class Ecoflow:
 
         try:
             self.token = response["data"]["token"]
-            # self.user_id = response["data"]["user"]["userId"]
-            # user_name = response["data"]["user"].get("name", "<no user name>")
+            self.user_id = response["data"]["user"]["userId"]
+            user_name = response["data"]["user"].get("name", "<no user name>")
             auth_ok = True
         except KeyError as key:
             raise Exception(f"Failed to extract key {key} from response: {response}")
 
-        _LOGGER.info("Successfully logged in.")
+        _LOGGER.info("Successfully logged in: %s", {user_name})
 
         self.get_device()  # collect device info
 
@@ -114,28 +114,19 @@ class Ecoflow:
 
     # Fetch the data from the PowerOcean device, which then constitues the Sensors
     def fetch_data(self):
-        """Fetch data from Url."""
+        """Function fetch data from Url."""
+        # curl 'https://api-e.ecoflow.com/provider-service/user/device/detail?sn={self.sn}}' \
+        # -H 'authorization: Bearer {self.token}'
+
         url = self.url_user_fetch
         try:
-            headers = {
-                "authorization": f"Bearer {self.token}",
-                "user-agent": "Firefox/133.0",
-            }
+            headers = {"authorization": f"Bearer {self.token}", "lang": "en_US", "content-type": "application/json", 
+                       "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"}
             request = requests.get(self.url_user_fetch, headers=headers, timeout=30)
             response = self.get_json_response(request)
 
-            try:
-                # TESTING!!! create response file and use it as data
-                with Path.open(FAKEDATA, "r", encoding="utf-8") as datei:
-                    response = json_loads(datei.read())
-            except FileExistsError:
-                error = f"Data from: {FAKEDATA}"
-                _LOGGER.warning(error)
-            except FileNotFoundError:
-                error = f"Responsefile not present: {FAKEDATA}"
-                _LOGGER.debug(error)
-
             _LOGGER.debug(f"{response}")
+
             return self._get_sensors(response)
 
         except ConnectionError:
@@ -149,7 +140,7 @@ class Ecoflow:
             raise IntegrationError(error)
 
     def __get_unit(self, key):
-        """Get unit from key name."""
+        """Function get unit from key Name."""
         if key.endswith(("pwr", "Pwr", "Power")):
             unit = "W"
         elif key.endswith(("amp", "Amp")):
@@ -162,7 +153,7 @@ class Ecoflow:
             unit = "Wh"
         elif "Generation" in key:
             unit = "kWh"
-        elif key.startswith("bpTemp"):
+        elif key.startswith("bpTemp"):  # TODO: alternative: 'Temp' in key
             unit = "°C"
         else:
             unit = None
@@ -201,35 +192,95 @@ class Ecoflow:
 
         return description
 
-    def __get_sens_select(self, report):
-        # open File an read
-        with Path.open(SENSSELECT) as file:
-            config = json_loads(file.read())
-
-        return config[report]
-
     def _get_sensors(self, response):
-        # get sensors from response['data']
+        
+        # check whether power ocean system is a dual master slave installation
+        
+        serials = self._get_serial_numbers(response)
+        
+        _LOGGER.debug(f"no_of_inverters_found_=_{serials}")
+        
+        # if serials = 2, installation is a dual inverter one
+        
+        if serials == 2:
+            serial_copy = serials
+            _LOGGER.debug(f"dual inverter system")
+            _LOGGER.debug(f"master_sn__{self.master_sn}")
+            _LOGGER.debug(f"slave_sn__{self.slave_sn}")
+            master_string = "_master"
+            slave_string = "_slave"
+        elif serials == 0:
+            # if serials = 1, installation is a single inverter
+            _LOGGER.debug(f"single inverter system")
+            master_string = ""
+        else:
+            # if serials is neither 1 nor 2, installation configuration is unknown and integration cannot function
+            _LOGGER.debug(f"neither single nor dual inverter system - aborting")
+            return
+            
+        # get sensors from response master segment
+        
         sensors = self.__get_sensors_data(response)
+        
+        # get sensors from master 'JTS1_ENERGY_STREAM_REPORT'
+        # sensors = self.__get_sensors_energy_stream(self.master_data, sensors)  # is currently not in use
 
-        # get sensors from 'JTS1_ENERGY_STREAM_REPORT'
-        sensors = self.__get_sensors_energy_stream(response, sensors)
+        # get sensors from master 'JTS1_EMS_CHANGE_REPORT'
+        
+        sensors = self.__get_sensors_ems_change(self.master_data, sensors, self.master_sn, master_string)
 
-        # get sensors from 'JTS1_EMS_CHANGE_REPORT'
-        sensors = self.__get_sensors_ems_change(response, sensors)
+        # get info from master segment JTS1_BP_STA_REPORT
+        
+        sensors = self.__get_sensors_battery(self.master_data, sensors, self.master_sn, master_string)
+        
+        # get info from master segment JTS1_EMS_HEARTBEAT report
+        
+        sensors = self.__get_sensors_ems_heartbeat(self.master_data, sensors, self.master_sn, master_string)
+        
 
-        # get info from batteries  => JTS1_BP_STA_REPORT
-        sensors = self.__get_sensors_battery(response, sensors)
+        if serials == 2:
+            # if dual inverter installation, get sensors from response slave segment
+            
+            # get sensors from slave segment 'JTS1_ENERGY_STREAM_REPORT'
+            # sensors = self.__get_sensors_energy_stream(self.slave_data, sensors, self.slave_sn, slave_string)  # is currently not in use
 
-        # get info from PV strings  => JTS1_EMS_HEARTBEAT
-        sensors = self.__get_sensors_ems_heartbeat(response, sensors)
+            # get sensors from slave 'JTS1_EMS_CHANGE_REPORT'
+        
+            sensors = self.__get_sensors_ems_change(self.slave_data, sensors, self.slave_sn, slave_string)
+
+
+            # get info from slave batteries  => JTS1_BP_STA_REPORT
+            sensors = self.__get_sensors_battery(self.slave_data, sensors, self.slave_sn, slave_string)
+        
+            # get info from slave PV strings  => JTS1_EMS_HEARTBEAT
+            sensors = self.__get_sensors_ems_heartbeat(self.slave_data, sensors, self.slave_sn, slave_string)
+        
+        _LOGGER.debug(f"log_full_sensor_details__{sensors}")
+        _LOGGER.debug(f"log_sensor_names__{list(sensors)}")
+        
 
         return sensors
 
     def __get_sensors_data(self, response):
         d = response["data"].copy()
 
-        sens_select = self.__get_sens_select("data")
+        # sensors not in use: note, bpSoc is taken from the EMS CHANGE report
+        # [ 'bpSoc', 'sysBatChgUpLimit', 'sysBatDsgDownLimit','sysGridSta', 'sysOnOffMachineStat',
+        #   'location', 'timezone', 'quota']
+
+        sens_select = [
+            "sysLoadPwr",
+            "sysGridPwr",
+            "mpptPwr",
+            "bpPwr",
+            "online",
+            "todayElectricityGeneration",
+            "monthElectricityGeneration",
+            "yearElectricityGeneration",
+            "totalElectricityGeneration",
+            "systemName",
+            "createTime",
+        ]
 
         sensors = dict()  # start with empty dict
         for key, value in d.items():
@@ -240,12 +291,6 @@ class Ecoflow:
                     special_icon = None
                     if key == "mpptPwr":
                         special_icon = "mdi:solar-power"
-                    if key == "online":
-                        special_icon = "mdi:cloud-check"
-                    if key == "sysGridPwr":
-                        special_icon = "mdi:transmission-tower-import"
-                    if key == "sysLoadPwr":
-                        special_icon = "mdi:home-import-outline"
 
                     sensors[unique_id] = PowerOceanEndPoint(
                         internal_unique_id=unique_id,
@@ -260,43 +305,55 @@ class Ecoflow:
 
         return sensors
 
-    def __get_sensors_energy_stream(self, response, sensors):
-        report = "JTS1_ENERGY_STREAM_REPORT"
-        d = response["data"]["quota"][report]
-        sens_select = self.__get_sens_select(report)
+    # Note, this report is currently not in use. Sensors are taken from response['data']
+    # def __get_sensors_energy_stream(self, response, sensors):
+    #     report = "JTS1_ENERGY_STREAM_REPORT"
+    #     d = response["data"]["quota"][report]
+    #     prefix = (
+    #         "_".join(report.split("_")[1:3]).lower() + "_"
+    #     )  # used to construct sensor name
+    #
+    #     # sens_all = ['bpSoc', 'mpptPwr', 'updateTime', 'bpPwr', 'sysLoadPwr', 'sysGridPwr']
+    #     sens_select = d.keys()
+    #     data = {}
+    #     for key, value in d.items():
+    #         if key in sens_select:  # use only sensors in sens_select
+    #             # default uid, unit and descript
+    #             unique_id = f"{self.sn}_{report}_{key}"
+    #
+    #             data[unique_id] = PowerOceanEndPoint(
+    #                 internal_unique_id=unique_id,
+    #                 serial=self.sn,
+    #                 name=f"{self.sn}_{prefix+key}",
+    #                 friendly_name=prefix + key,
+    #                 value=value,
+    #                 unit=self.__get_unit(key),
+    #                 description=self.__get_description(key),
+    #                 icon=None,
+    #             )
+    #     dict.update(sensors, data)
+    #
+    #     return sensors
 
-        data = {}
-        for key, value in d.items():
-            if key in sens_select:
-                # default uid, unit and descript
-                unique_id = f"{self.sn}_{report}_{key}"
-                special_icon = None
-                if key.startswith(("pv1", "pv2")):
-                    special_icon = "mdi:solar-power"
-                description_tmp = self.__get_description(key)
-                data[unique_id] = PowerOceanEndPoint(
-                    internal_unique_id=unique_id,
-                    serial=self.sn,
-                    name=f"{self.sn}_{key}",
-                    friendly_name=key,
-                    value=value,
-                    unit=self.__get_unit(key),
-                    description=description_tmp,
-                    icon=special_icon,
-                )
-
-        dict.update(sensors, data)
-
-        return sensors
-
-    def __get_sensors_ems_change(self, response, sensors):
+    def __get_sensors_ems_change(self, inverter_dataset, sensors, inverter_sn, inverter_string):
+        # function modified to process either master or slave segment
+        
         report = "JTS1_EMS_CHANGE_REPORT"
-        d = response["data"]["quota"][report]
+        d = inverter_dataset[report]
 
-        sens_select = self.__get_sens_select(report)
+
+        sens_select = [
+            "bpTotalChgEnergy",
+            "bpTotalDsgEnergy",
+            "bpSoc",
+            "bpOnlineSum",  # number of batteries
+            "emsCtrlLedBright",
+        ]
 
         # add mppt Warning/Fault Codes
         keys = d.keys()
+
+        
         r = re.compile("mppt.*Code")
         wfc = list(filter(r.match, keys))  # warning/fault code keys
         sens_select += wfc
@@ -305,30 +362,45 @@ class Ecoflow:
         for key, value in d.items():
             if key in sens_select:  # use only sensors in sens_select
                 # default uid, unit and descript
-                unique_id = f"{self.sn}_{report}_{key}"
+                unique_id = f"{inverter_sn}_{report}_{key}"
 
                 data[unique_id] = PowerOceanEndPoint(
                     internal_unique_id=unique_id,
-                    serial=self.sn,
-                    name=f"{self.sn}_{key}",
-                    friendly_name=key,
+                    serial=inverter_sn,
+                    name=f"{inverter_sn}_{key}",
+                    friendly_name=key + inverter_string,
                     value=value,
                     unit=self.__get_unit(key),
                     description=self.__get_description(key),
                     icon=None,
                 )
         dict.update(sensors, data)
-
+        
         return sensors
 
-    def __get_sensors_battery(self, response, sensors):
+    def __get_sensors_battery(self, inverter_data, sensors, inverter_sn, inverter_string):
+        
+        # function modified to process either master or slave segment
+
         report = "JTS1_BP_STA_REPORT"
-        d = response["data"]["quota"][report]
+        # change to process inverter data set
+        
+        d = inverter_data[report]
+        
         keys = list(d.keys())
 
         # loop over N batteries:
         batts = [s for s in keys if len(s) > 12]
-        bat_sens_select = self.__get_sens_select(report)
+        bat_sens_select = [
+            "bpPwr",
+            "bpSoc",
+            "bpSoh",
+            "bpVol",
+            "bpAmp",
+            "bpCycles",
+            "bpSysState",
+            "bpRemainWatth",
+        ]
 
         data = {}
         prefix = "bpack"
@@ -338,16 +410,16 @@ class Ecoflow:
             for key, value in d_bat.items():
                 if key in bat_sens_select:
                     # default uid, unit and descript
-                    unique_id = f"{self.sn}_{report}_{bat}_{key}"
+                    unique_id = f"{inverter_sn}_{report}_{bat}_{key}"
                     description_tmp = f"{name}" + self.__get_description(key)
                     special_icon = None
                     if key == "bpAmp":
                         special_icon = "mdi:current-dc"
                     data[unique_id] = PowerOceanEndPoint(
                         internal_unique_id=unique_id,
-                        serial=self.sn,
-                        name=f"{self.sn}_{name + key}",
-                        friendly_name=name + key,
+                        serial=inverter_sn,
+                        name=f"{inverter_sn}_{name + key}",
+                        friendly_name=name + key + inverter_string,
                         value=value,
                         unit=self.__get_unit(key),
                         description=description_tmp,
@@ -357,13 +429,13 @@ class Ecoflow:
             key = "bpTemp"
             temp = d_bat[key]
             value = sum(temp) / len(temp)
-            unique_id = f"{self.sn}_{report}_{bat}_{key}"
+            unique_id = f"{inverter_sn}_{report}_{bat}_{key}"
             description_tmp = f"{name}" + self.__get_description(key)
             data[unique_id] = PowerOceanEndPoint(
                 internal_unique_id=unique_id,
-                serial=self.sn,
-                name=f"{self.sn}_{name + key}",
-                friendly_name=name + key,
+                serial=inverter_sn,
+                name=f"{inverter_sn}_{name + key}",
+                friendly_name=name + key + inverter_string,
                 value=value,
                 unit=self.__get_unit(key),
                 description=description_tmp,
@@ -374,22 +446,33 @@ class Ecoflow:
 
         return sensors
 
-    def __get_sensors_ems_heartbeat(self, response, sensors):
-        report = "JTS1_EMS_HEARTBEAT"
-        d = response["data"]["quota"][report]
-        sens_select = self.__get_sens_select(report)
+    def __get_sensors_ems_heartbeat(self, inverter_data, sensors, inverter_sn, inverter_string):
+        
+        # function modified to process either master or slave segment
 
+        report = "JTS1_EMS_HEARTBEAT"
+        d = inverter_data[report]
+
+        # sens_select = d.keys()  # 68 Felder
+        sens_select = [
+            "bpRemainWatth",
+            "emsBpAliveNum",
+            "emsBpPower",
+            "pcsActPwr",
+            "pcsMeterPower",
+
+        ]
         data = {}
         for key, value in d.items():
             if key in sens_select:
                 # default uid, unit and descript
-                unique_id = f"{self.sn}_{report}_{key}"
+                unique_id = f"{inverter_sn}_{report}_{key}"
                 description_tmp = self.__get_description(key)
                 data[unique_id] = PowerOceanEndPoint(
                     internal_unique_id=unique_id,
-                    serial=self.sn,
-                    name=f"{self.sn}_{key}",
-                    friendly_name=key,
+                    serial=inverter_sn,
+                    name=f"{inverter_sn}_{key}",
+                    friendly_name=key + inverter_string,
                     value=value,
                     unit=self.__get_unit(key),
                     description=description_tmp,
@@ -398,72 +481,125 @@ class Ecoflow:
 
         # special for phases
         phases = ["pcsAPhase", "pcsBPhase", "pcsCPhase"]
-        if phases[1] in d:
-            for i, phase in enumerate(phases):
-                for key, value in d[phase].items():
-                    name = phase + "_" + key
-                    unique_id = f"{self.sn}_{report}_{name}"
+        for i, phase in enumerate(phases):
+            for key, value in d[phase].items():
+                name = phase + "_" + key
+                unique_id = f"{inverter_sn}_{report}_{name}"
 
-                    data[unique_id] = PowerOceanEndPoint(
-                        internal_unique_id=unique_id,
-                        serial=self.sn,
-                        name=f"{self.sn}_{name}",
-                        friendly_name=f"{name}",
-                        value=value,
-                        unit=self.__get_unit(key),
-                        description=self.__get_description(key),
-                        icon=None,
-                    )
+                data[unique_id] = PowerOceanEndPoint(
+                    internal_unique_id=unique_id,
+                    serial=inverter_sn,
+                    name=f"{inverter_sn}_{name}",
+                    friendly_name=f"{name}{inverter_string}",
+                    value=value,
+                    unit=self.__get_unit(key),
+                    description=self.__get_description(key),
+                    icon=None,
+                )
 
         # special for mpptPv
-        if "mpptHeartBeat" in d:
-            n_strings = len(d["mpptHeartBeat"][0]["mpptPv"])  # TODO: auch als Sensor?
-            mpptpvs = []
-            for i in range(1, n_strings + 1):
-                mpptpvs.append(f"mpptPv{i}")
-            mpptPv_sum = 0.0
-            for i, mpptpv in enumerate(mpptpvs):
-                for key, value in d["mpptHeartBeat"][0]["mpptPv"][i].items():
-                    unique_id = f"{self.sn}_{report}_mpptHeartBeat_{mpptpv}_{key}"
-                    special_icon = None
-                    if key.endswith("amp"):
-                        special_icon = "mdi:current-dc"
-                    if key.endswith("pwr"):
-                        special_icon = "mdi:solar-power"
+        n_strings = len(d["mpptHeartBeat"][0]["mpptPv"])  # TODO: auch als Sensor?
+        mpptpvs = []
+        for i in range(1, n_strings + 1):
+            mpptpvs.append(f"mpptPv{i}")
+        mpptPv_sum = 0.0
+        for i, mpptpv in enumerate(mpptpvs):
+            for key, value in d["mpptHeartBeat"][0]["mpptPv"][i].items():
+                unique_id = f"{inverter_sn}_{report}_mpptHeartBeat_{mpptpv}_{key}"
+                special_icon = None
+                if key.endswith("amp"):
+                    special_icon = "mdi:current-dc"
+                if key.endswith("pwr"):
+                    special_icon = "mdi:solar-power"
 
-                    data[unique_id] = PowerOceanEndPoint(
-                        internal_unique_id=unique_id,
-                        serial=self.sn,
-                        name=f"{self.sn}_{mpptpv}_{key}",
-                        friendly_name=f"{mpptpv}_{key}",
-                        value=value,
-                        unit=self.__get_unit(key),
-                        description=self.__get_description(key),
-                        icon=special_icon,
-                    )
-                    # sum power of all strings
-                    if key == "pwr":
-                        mpptPv_sum += value
+                data[unique_id] = PowerOceanEndPoint(
+                    internal_unique_id=unique_id,
+                    serial=self.sn,
+                    name=f"{inverter_sn}_{mpptpv}_{key}",
+                    friendly_name=f"{mpptpv}_{key}{inverter_string}",
+                    value=value,
+                    unit=self.__get_unit(key),
+                    description=self.__get_description(key),
+                    icon=special_icon,
+                )
+                # sum power of all strings
+                if key == "pwr":
+                    mpptPv_sum += value
 
-            # create total power sensor of all strings
-            name = "mpptPv_pwrTotal"
-            unique_id = f"{self.sn}_{report}_mpptHeartBeat_{name}"
+        # create total power sensor of all strings
+        name = "mpptPv_pwrTotal"
+        unique_id = f"{inverter_sn}_{report}_mpptHeartBeat_{name}"
 
-            data[unique_id] = PowerOceanEndPoint(
-                internal_unique_id=unique_id,
-                serial=self.sn,
-                name=f"{self.sn}_{name}",
-                friendly_name=f"{name}",
-                value=mpptPv_sum,
-                unit=self.__get_unit(key),
-                description="Solarertrag aller Strings",
-                icon="mdi:solar-power",
-            )
+        data[unique_id] = PowerOceanEndPoint(
+            internal_unique_id=unique_id,
+            serial=inverter_sn,
+            name=f"{inverter_sn}_{name}",
+            friendly_name=f"{name}{inverter_string}",
+            value=mpptPv_sum,
+            unit=self.__get_unit(key),
+            description="Solarertrag aller Strings",
+            icon="mdi:solar-power",
+        )
 
         dict.update(sensors, data)
 
         return sensors
+        
+    def _get_serial_numbers(self, response):
 
+        # extra function to determine whether installation installation has single or dual inverter
+        # and to create master and slave response segments
+    
+        _LOGGER.debug(f"GSM1_=_{self.sn}")
+
+        p = response["data"]
+
+        if 'parallel' in p.keys():
+            # installation is dual inverter one
+            # p portion of response contains master and slave segments
+            p = response["data"]["parallel"]
+        else:
+            # installation is single inverter, create master segment
+            self.master_data = response["data"]["quota"]
+            return 0
+        
+        # get keys of the 'data' 'parallel' segment
+        keys_2 = p.keys()
+    
+        # first serial number is the first key of the 'data' 'parallel' segment
+        
+        self.first_sn = next(iter(keys_2))
+        
+    
+
+        # second serial number is the last key of the 'data' 'parallel' segment
+        
+        self.second_sn = next(reversed(keys_2))
+        
+        # create inverter segments
+        
+        if self.first_sn == self.master_sn:
+            # first segment relates to master inverter
+            self.slave_sn = self.second_sn
+            self.master_data = response["data"]["parallel"][self.first_sn]
+            self.master_data = response["data"]["parallel"][self.first_sn]
+            self.slave_data = response["data"]["parallel"][self.second_sn]
+        else:
+            # first segment relates to slave inverter
+            self.slave_sn = self.first_sn
+            self.master_data = response["data"]["parallel"][self.second_sn]
+            self.slave_data = response["data"]["parallel"][self.first_sn]
+
+
+       
+
+        # 2 denotes dual inverter installation
+        # if not 2 can't be handled
+
+
+        return len(p)
+  
 
 class AuthenticationFailed(Exception):
     """Exception to indicate authentication failure."""
+
